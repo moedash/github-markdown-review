@@ -252,42 +252,53 @@ function observeComments(): void {
 }
 
 function parseAndAddComment(text: string, id: string): void {
-    // Look for our comment format: On "selected text": or quoted text
-    const patterns = [
-        /On\s+[""`]([^""`]+)[""`]:/,
-        /On\s+`([^`]+)`:/,
-        />\s*[""]([^""]+)[""]/,
-    ];
+    // Clean up the text
+    const cleanText = text.trim().replace(/\s+/g, ' ').slice(0, 500);
 
-    for (const pattern of patterns) {
-        const match = text.match(pattern);
-        if (match) {
-            const selectedText = match[1];
+    // Skip empty or very short comments
+    if (cleanText.length < 5) return;
 
-            // Check if already exists
-            if (comments.some(c => c.selectedText.slice(0, 20) === selectedText.slice(0, 20))) {
-                return;
-            }
+    // Skip template/boilerplate text
+    if (cleanText.includes('What changed?') ||
+        cleanText.includes('Nothing to preview') ||
+        cleanText.includes('Fixes #')) {
+        return;
+    }
 
-            // Extract the actual comment (text after the match)
-            const afterMatch = text.slice(text.indexOf(match[0]) + match[0].length).trim();
-            if (afterMatch.length < 3) return;
+    // Check if already exists (by first 30 chars)
+    if (comments.some(c => c.text.slice(0, 30) === cleanText.slice(0, 30))) {
+        return;
+    }
 
-            comments.push({
-                id: id || `gh-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-                text: afterMatch.slice(0, 300),
-                selectedText: selectedText.slice(0, 100),
-                filePath: 'document.md',
-                startOffset: 0,
-                endOffset: 0,
-                timestamp: Date.now(),
-                postedToGitHub: true,
-            });
+    // Check if this is our formatted comment (On "text":)
+    const ourFormatMatch = text.match(/On\s+[""`]([^""`]+)[""`]:/);
+    let selectedText = '';
+    let commentText = cleanText;
 
-            console.log(`[MD Review] Parsed comment on "${selectedText.slice(0, 30)}..."`);
-            return;
+    if (ourFormatMatch) {
+        selectedText = ourFormatMatch[1];
+        // Get text after the quote
+        const afterMatch = text.slice(text.indexOf(ourFormatMatch[0]) + ourFormatMatch[0].length);
+        const quoteMatch = afterMatch.match(/>\s*[""]([^""]+)[""]/);
+        if (quoteMatch) {
+            commentText = afterMatch.slice(afterMatch.indexOf(quoteMatch[0]) + quoteMatch[0].length).trim();
+        } else {
+            commentText = afterMatch.trim();
         }
     }
+
+    comments.push({
+        id: id || `gh-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        text: commentText.slice(0, 300),
+        selectedText: selectedText.slice(0, 100),
+        filePath: 'document.md',
+        startOffset: 0,
+        endOffset: 0,
+        timestamp: Date.now(),
+        postedToGitHub: true,
+    });
+
+    console.log(`[MD Review] Added comment: "${commentText.slice(0, 40)}..."`);
 }
 
 function loadComments(): void {
