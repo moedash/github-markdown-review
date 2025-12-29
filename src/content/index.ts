@@ -54,103 +54,200 @@ function init(): void {
     }
 }
 
-function loadExistingGitHubComments(): void {
-    // Inject script to access GitHub's internal state
-    const script = document.createElement('script');
-    script.textContent = `
-    (function() {
-      // Try to find GitHub's comment data
-      let commentsData = [];
-      
-      // Method 1: Check for embedded JSON data
-      const scripts = document.querySelectorAll('script[type="application/json"]');
-      scripts.forEach(s => {
-        try {
-          const data = JSON.parse(s.textContent);
-          if (data.comments) commentsData = commentsData.concat(data.comments);
-          if (data.issueComments) commentsData = commentsData.concat(data.issueComments);
-        } catch(e) {}
-      });
-      
-      // Method 2: Look for React fiber/state
-      const reactRoot = document.querySelector('[data-turbo-body]') || document.getElementById('repo-content-turbo-frame');
-      if (reactRoot && reactRoot._reactRootContainer) {
-        console.log('[MD Review] Found React root');
-      }
-      
-      // Method 3: Find timeline items with comment data
-      const timelineItems = document.querySelectorAll('.js-timeline-item, [data-gid]');
-      timelineItems.forEach(item => {
-        const bodyEl = item.querySelector('.comment-body, .js-comment-body');
-        if (bodyEl) {
-          const gid = item.getAttribute('data-gid') || item.id;
-          commentsData.push({
-            id: gid,
-            body: bodyEl.innerHTML,
-            text: bodyEl.textContent
-          });
-        }
-      });
-      
-      // Send back to content script
-      window.postMessage({ type: 'MD_REVIEW_COMMENTS', comments: commentsData }, '*');
-    })();
-  `;
-    document.head.appendChild(script);
-    script.remove();
+async function loadExistingGitHubComments(): Promise<void> {
+    // Fetch comments from GitHub's API (same-origin, uses session cookies)
+    await fetchCommentsFromAPI();
 
-    // Listen for response
-    window.addEventListener('message', handleGitHubComments);
+    // Also parse embedded JSON data for comments
+    parseEmbeddedData();
 
-    // Also scan DOM directly as fallback
+    // Scan DOM for visible comments
     scanDOMForComments();
+
+    // Watch for dynamically loaded comments
+    observeComments();
 }
 
-function handleGitHubComments(event: MessageEvent): void {
-    if (event.data.type !== 'MD_REVIEW_COMMENTS') return;
+async function fetchCommentsFromAPI(): Promise<void> {
+    const match = window.location.pathname.match(/\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+    if (!match) return;
 
-    const ghComments = event.data.comments || [];
-    console.log(`[MD Review] Received ${ghComments.length} comments from page context`);
+    const [, owner, repo, prNumber] = match;
 
-    ghComments.forEach((c: any) => {
-        if (c.text) {
-            parseAndAddComment(c.text, c.id);
+    try {
+        // Fetch issue comments (main PR comments)
+        const commentsUrl = `/${owner}/${repo}/issues/${prNumber}/comments`;
+        const response = await fetch(commentsUrl, {
+            headers: { 'Accept': 'application/json' }
+        });
+
+        if (response.ok) {
+            const html = await response.text();
+            // Try to parse as JSON if GitHub returns it
+            try {
+                const data = JSON.parse(html);
+                if (Array.isArray(data)) {
+                    console.log(`[MD Review] Fetched ${data.length} comments from API`);
+                    data.forEach((c: any) => {
+                        if (c.body) parseAndAddComment(c.body, c.id?.toString() || '');
+                    });
+                }
+            } catch {
+                // HTML response, parse it
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(html, 'text/html');
+                const bodies = doc.querySelectorAll('.comment-body, .js-comment-body, .markdown-body');
+                console.log(`[MD Review] Parsed ${bodies.length} comments from HTML response`);
+                bodies.forEach(body => {
+                    if (body.textContent) parseAndAddComment(body.textContent, '');
+                });
+            }
         }
-    });
+
+        // Also try the timeline endpoint
+        const timelineUrl = `/${owner}/${repo}/pull/${prNumber}/timeline`;
+        const timelineResp = await fetch(timelineUrl, {
+            headers: { 'Accept': 'text/html' }
+        });
+
+        if (timelineResp.ok) {
+            const html = await timelineResp.text();
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
+            const bodies = doc.querySelectorAll('.comment-body, .js-comment-body');
+            console.log(`[MD Review] Found ${bodies.length} comments in timeline`);
+            bodies.forEach(body => {
+                if (body.textContent) {
+                    console.log(`[MD Review] Timeline comment: "${body.textContent.slice(0, 50)}..."`);
+                    parseAndAddComment(body.textContent, '');
+                }
+            });
+        }
+    } catch (e) {
+        console.log('[MD Review] Could not fetch comments:', e);
+    }
 
     if (comments.length > 0) {
         renderCommentsSidebar();
     }
 }
 
-function scanDOMForComments(): void {
-    // Scan all elements that might contain comments
-    const containers = document.querySelectorAll(
-        '.js-discussion, .js-timeline-item, .review-comment, .timeline-comment, ' +
-        '[data-gid], .js-comment, .comment, .issue-comment'
-    );
+function parseEmbeddedData(): void {
+    // GitHub embeds data in script tags
+    const scripts = document.querySelectorAll('script[type="application/json"], script[data-target]');
 
-    console.log(`[MD Review] Scanning ${containers.length} potential comment containers`);
-
-    containers.forEach((container) => {
-        const bodyEl = container.querySelector('.comment-body, .js-comment-body, .markdown-body');
-        if (bodyEl) {
-            const text = bodyEl.textContent || '';
-            const id = container.getAttribute('data-gid') || container.id || '';
-            parseAndAddComment(text, id);
+    scripts.forEach(script => {
+        try {
+            const text = script.textContent || '';
+            if (text.includes('comment') || text.includes('review')) {
+                const data = JSON.parse(text);
+                extractCommentsFromData(data);
+            }
+        } catch (e) {
+            // Not valid JSON, skip
         }
     });
 
-    // Also check for inline review comments in diff view
-    const reviewComments = document.querySelectorAll('.review-comment-contents, .inline-comment-form-container');
-    reviewComments.forEach((rc) => {
-        const text = rc.textContent || '';
-        parseAndAddComment(text, '');
+    // Also check for data attributes on the page
+    const prData = document.querySelector('[data-issue-and-pr-hovercards-url]');
+    if (prData) {
+        console.log('[MD Review] Found PR data element');
+    }
+}
+
+function extractCommentsFromData(data: any, depth = 0): void {
+    if (depth > 5 || !data) return;
+
+    if (Array.isArray(data)) {
+        data.forEach(item => extractCommentsFromData(item, depth + 1));
+        return;
+    }
+
+    if (typeof data === 'object') {
+        // Look for comment-like objects
+        if (data.body && typeof data.body === 'string') {
+            parseAndAddComment(data.body, data.id || data.databaseId || '');
+        }
+        if (data.bodyText && typeof data.bodyText === 'string') {
+            parseAndAddComment(data.bodyText, data.id || '');
+        }
+
+        // Recurse into nested objects
+        Object.values(data).forEach(v => extractCommentsFromData(v, depth + 1));
+    }
+}
+
+function scanDOMForComments(): void {
+    // Comprehensive list of comment container selectors
+    const selectors = [
+        // Standard comment containers
+        '.js-timeline-item',
+        '.js-comment',
+        '.timeline-comment',
+        '.review-comment',
+        '.issue-comment',
+        // Diff view comments
+        '.inline-comments',
+        '.review-thread',
+        '.js-resolvable-thread-contents',
+        '[data-line-comments]',
+        // PR specific
+        '.discussion-timeline-actions',
+        '.js-discussion',
+        // Generic
+        '[data-gid]',
+        '[data-url*="comment"]',
+    ];
+
+    const allContainers = new Set<Element>();
+    selectors.forEach(sel => {
+        document.querySelectorAll(sel).forEach(el => allContainers.add(el));
+    });
+
+    console.log(`[MD Review] Scanning ${allContainers.size} potential comment containers`);
+
+    allContainers.forEach((container) => {
+        // Find the comment body within
+        const bodySelectors = ['.comment-body', '.js-comment-body', '.markdown-body', '.review-comment-contents'];
+        for (const sel of bodySelectors) {
+            const bodyEl = container.querySelector(sel);
+            if (bodyEl && bodyEl.textContent && bodyEl.textContent.trim().length > 5) {
+                const text = bodyEl.textContent;
+                const id = container.getAttribute('data-gid') || container.id || '';
+                console.log(`[MD Review] Found comment body: "${text.slice(0, 50).replace(/\n/g, ' ')}..."`);
+                parseAndAddComment(text, id);
+                break;
+            }
+        }
     });
 
     if (comments.length > 0) {
-        console.log(`[MD Review] Total comments loaded: ${comments.length}`);
+        console.log(`[MD Review] Loaded ${comments.length} comments`);
         renderCommentsSidebar();
+    }
+}
+
+function observeComments(): void {
+    // Watch for dynamically added comments
+    const observer = new MutationObserver((mutations) => {
+        let foundNew = false;
+        mutations.forEach(m => {
+            m.addedNodes.forEach(node => {
+                if (node instanceof HTMLElement) {
+                    const body = node.querySelector?.('.comment-body, .js-comment-body');
+                    if (body?.textContent) {
+                        parseAndAddComment(body.textContent, '');
+                        foundNew = true;
+                    }
+                }
+            });
+        });
+        if (foundNew) renderCommentsSidebar();
+    });
+
+    const timeline = document.querySelector('.js-discussion, .pull-discussion-timeline, main');
+    if (timeline) {
+        observer.observe(timeline, { childList: true, subtree: true });
     }
 }
 
