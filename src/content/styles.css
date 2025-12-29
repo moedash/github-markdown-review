@@ -379,6 +379,14 @@
     line-height: 1.4;
 }
 
+.md-review-popup-author,
+.md-review-comment-author {
+    font-size: 12px;
+    font-weight: 600;
+    color: #58a6ff;
+    margin-bottom: 4px;
+}
+
 .md-review-comment-quote {
     font-size: 12px;
     color: #8b949e;
