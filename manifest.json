@@ -1,0 +1,35 @@
+{
+    "manifest_version": 3,
+    "name": "GitHub MD Review",
+    "version": "1.0.0",
+    "description": "Add inline comments to GitHub's rich diff view for markdown files",
+    "permissions": [
+        "storage",
+        "activeTab",
+        "clipboardWrite"
+    ],
+    "host_permissions": [
+        "https://github.com/*"
+    ],
+    "background": {
+        "service_worker": "background.js",
+        "type": "module"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "https://github.com/*/*/pull/*"
+            ],
+            "js": [
+                "content.js"
+            ],
+            "css": [],
+            "run_at": "document_end"
+        }
+    ],
+    "action": {
+        "default_popup": "popup/index.html",
+        "default_title": "GitHub MD Review"
+    },
+    "icons": {}
+}

@@ -1,0 +1,212 @@
+/* MD Review Extension Styles */
+
+/* Make markdown bodies selectable with visual feedback */
+.md-review-selectable {
+  cursor: text;
+  user-select: text;
+}
+
+.md-review-selectable::selection,
+.md-review-selectable *::selection {
+  background: rgba(88, 166, 255, 0.3);
+}
+
+/* Comment Box */
+.md-review-comment-box {
+  position: absolute;
+  z-index: 10000;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  width: 320px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  color: #c9d1d9;
+}
+
+.md-review-comment-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 12px;
+  border-bottom: 1px solid #30363d;
+  gap: 8px;
+}
+
+.md-review-selected-text {
+  font-size: 12px;
+  color: #8b949e;
+  font-style: italic;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: rgba(88, 166, 255, 0.1);
+  padding: 4px 8px;
+  border-radius: 4px;
+  border-left: 2px solid #58a6ff;
+}
+
+.md-review-close-btn {
+  background: none;
+  border: none;
+  color: #8b949e;
+  font-size: 20px;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+
+.md-review-close-btn:hover {
+  color: #c9d1d9;
+  background: #30363d;
+}
+
+.md-review-textarea {
+  width: calc(100% - 24px);
+  margin: 12px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #c9d1d9;
+  padding: 10px 12px;
+  font-size: 14px;
+  font-family: inherit;
+  resize: vertical;
+  min-height: 60px;
+}
+
+.md-review-textarea:focus {
+  outline: none;
+  border-color: #58a6ff;
+  box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.1);
+}
+
+.md-review-textarea::placeholder {
+  color: #6e7681;
+}
+
+.md-review-comment-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px;
+  border-top: 1px solid #30363d;
+  background: #0d1117;
+  border-radius: 0 0 8px 8px;
+}
+
+.md-review-hint {
+  font-size: 11px;
+  color: #6e7681;
+}
+
+.md-review-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Buttons */
+.md-review-btn {
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: 1px solid transparent;
+}
+
+.md-review-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.md-review-btn-primary {
+  background: #238636;
+  color: white;
+  border-color: #238636;
+}
+
+.md-review-btn-primary:hover:not(:disabled) {
+  background: #2ea043;
+  border-color: #2ea043;
+}
+
+.md-review-btn-secondary {
+  background: transparent;
+  color: #c9d1d9;
+  border-color: #30363d;
+}
+
+.md-review-btn-secondary:hover:not(:disabled) {
+  background: #21262d;
+  border-color: #8b949e;
+}
+
+/* Notification */
+.md-review-notification {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 10001;
+  background: #238636;
+  color: white;
+  padding: 12px 20px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  animation: md-review-slide-in 0.3s ease;
+  max-width: 400px;
+}
+
+.md-review-notification-error {
+  background: #da3633;
+}
+
+.md-review-notification-hide {
+  animation: md-review-slide-out 0.3s ease forwards;
+}
+
+@keyframes md-review-slide-in {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes md-review-slide-out {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+}
+
+/* Active indicator badge */
+.md-review-badge {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  background: #238636;
+  color: white;
+  padding: 4px 8px;
+  border-radius: 4px;
+  z-index: 99999;
+  font-size: 12px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+}
