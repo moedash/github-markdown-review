@@ -459,189 +459,151 @@ function showCommentBox(selection: SelectionInfo): void {
     setTimeout(() => textarea.focus(), 10);
 }
 
-function postCommentToGitHub(selection: SelectionInfo, commentText: string): void {
+async function postCommentToGitHub(selection: SelectionInfo, commentText: string): Promise<void> {
     console.log('[MD Review] postCommentToGitHub called');
 
     // Format the comment
     const formattedComment = `**On \`${selection.filePath}\`:**\n\n> "${selection.text.slice(0, 100)}${selection.text.length > 100 ? '...' : ''}"\n\n${commentText}`;
 
-    // First, check if there's already a comment form open
-    let form = findGitHubCommentForm();
+    // Just create and submit a form directly
+    submitCommentForm(formattedComment);
+}
 
-    if (form) {
-        fillAndSubmit(form, formattedComment);
+async function submitCommentForm(body: string): Promise<void> {
+    const match = window.location.pathname.match(/\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+    if (!match) {
+        showNotification('Could not parse PR URL');
         return;
     }
 
-    // No form open - click GitHub's plus button to open one
-    console.log('[MD Review] No form found, clicking plus button...');
+    const [, owner, repo, prNumber] = match;
+    showNotification('Posting comment...');
 
-    clickGitHubPlusButton().then(plusClicked => {
-        if (plusClicked) {
-            // Wait for form to appear
-            setTimeout(() => {
-                const newForm = findGitHubCommentForm();
-                if (newForm) {
-                    fillAndSubmit(newForm, formattedComment);
-                } else {
-                    console.log('[MD Review] Form not appeared after click');
-                    retryWithScroll(formattedComment);
-                }
-            }, 600);
-        } else {
-            retryWithScroll(formattedComment);
-        }
-    });
-}
+    try {
+        // Fetch the conversation page to get the real form
+        const prUrl = `/${owner}/${repo}/pull/${prNumber}`;
+        console.log('[MD Review] Fetching PR page:', prUrl);
 
-function retryWithScroll(comment: string): void {
-    // Scroll to find the diff section
-    const diffContainer = document.querySelector('[data-hunk], .diff-table, .js-diff-progressive-container');
-    if (diffContainer instanceof HTMLElement) {
-        diffContainer.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const pageResp = await fetch(prUrl, {
+            credentials: 'same-origin',
+            headers: { 'Accept': 'text/html' },
+        });
 
-        setTimeout(() => {
-            clickGitHubPlusButton().then(clicked => {
-                if (clicked) {
-                    setTimeout(() => {
-                        const form = findGitHubCommentForm();
-                        if (form) {
-                            fillAndSubmit(form, comment);
-                        } else {
-                            showNotification('Switch to code diff view and click blue + on a line');
-                        }
-                    }, 600);
-                } else {
-                    showNotification('Switch to code diff view and click blue + on a line');
-                }
-            });
-        }, 500);
-    } else {
-        showNotification('Switch to code diff view and click blue + on a line');
-    }
-}
-
-function clickGitHubPlusButton(): Promise<boolean> {
-    return new Promise((resolve) => {
-        console.log('[MD Review] Looking for diff lines to click plus button...');
-
-        // Find the diff container (may be hidden if viewing rich diff)
-        const diffSelectors = [
-            // Code diff table rows
-            'table.diff-table tbody tr',
-            '[data-hunk] tr',
-            '.js-file-line-container tr',
-            // Individual line cells
-            '.blob-code-addition',
-            '.blob-code-deletion',
-            '.blob-code-context',
-            // Newer GitHub UI
-            '[data-line-number]',
-            '.diff-line-row',
-        ];
-
-        let targetLine: HTMLElement | null = null;
-
-        for (const sel of diffSelectors) {
-            const lines = document.querySelectorAll(sel);
-            console.log(`[MD Review] Selector "${sel}": ${lines.length} elements`);
-
-            for (const line of lines) {
-                if (line instanceof HTMLElement) {
-                    // Even if not visible, we can trigger events
-                    targetLine = line;
-                    break;
-                }
-            }
-            if (targetLine) break;
+        if (!pageResp.ok) {
+            throw new Error('Failed to fetch PR page');
         }
 
-        if (!targetLine) {
-            console.log('[MD Review] No diff lines found');
-            resolve(false);
+        const html = await pageResp.text();
+
+        // Extract form action - look for NEW comment form (ends with /issue_comments, no ID)
+        // The pattern should be /owner/repo/issue_comments NOT /issue_comments/12345
+        const actionMatch = html.match(/<form[^>]*action="(\/[^"]+\/issue_comments)"[^>]*class="[^"]*js-new-comment-form[^"]*"/);
+
+        // Also try finding by looking for the new comment field
+        const altMatch = html.match(/action="(\/[^"]+\/issue_comments)"[^>]*>/);
+
+        // Get the token from near the new comment form
+        const tokenMatch = html.match(/name="authenticity_token"[^>]*value="([^"]+)"/g);
+
+        // Find the action that doesn't have an ID at the end
+        let formAction = actionMatch?.[1];
+        if (!formAction && altMatch?.[1] && !altMatch[1].match(/\/issue_comments\/\d+$/)) {
+            formAction = altMatch[1];
+        }
+
+        // Use the last token (usually the one for new comments)
+        const lastToken = tokenMatch?.[tokenMatch.length - 1];
+        const authTokenMatch = lastToken?.match(/value="([^"]+)"/);
+        const authToken = authTokenMatch?.[1];
+
+        console.log('[MD Review] Form action:', formAction);
+        console.log('[MD Review] Token found:', !!authToken);
+        console.log('[MD Review] All actions found:', html.match(/action="([^"]*issue_comments[^"]*)"/g)?.slice(0, 5));
+
+        if (!formAction) {
+            formAction = `/${owner}/${repo}/issue_comments`;
+            console.log('[MD Review] Using constructed URL:', formAction);
+        }
+
+        const finalToken = authToken || getCSRFToken();
+        if (!finalToken) {
+            throw new Error('No auth token found');
+        }
+
+        // Now post to the real form action
+        const params = new URLSearchParams();
+        params.append('authenticity_token', finalToken);
+        params.append('comment[body]', body);
+
+        console.log('[MD Review] Posting to:', formAction);
+
+        const response = await fetch(formAction, {
+            method: 'POST',
+            body: params,
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            redirect: 'manual',
+        });
+
+        console.log('[MD Review] Response:', response.status, response.type);
+
+        // redirect or opaqueredirect = success
+        if (response.type === 'opaqueredirect' || response.status >= 300 && response.status < 400) {
+            console.log('[MD Review] Success!');
+            showNotification('Comment posted!');
+            setTimeout(loadCommentsFromGitHub, 1000);
             return;
         }
 
-        console.log('[MD Review] Found target line, simulating hover...');
+        if (response.ok) {
+            console.log('[MD Review] Success (200)');
+            showNotification('Comment posted!');
+            setTimeout(loadCommentsFromGitHub, 1000);
+            return;
+        }
 
-        // Simulate mouseenter to make plus button appear
-        targetLine.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true }));
-        targetLine.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true }));
-        targetLine.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true }));
+        throw new Error(`POST failed: ${response.status}`);
 
-        // Wait for plus button to appear
-        setTimeout(() => {
-            // Look for plus button that appeared
-            const plusSelectors = [
-                'button[aria-label*="comment" i]',
-                'button.js-add-line-comment',
-                '.add-line-comment',
-                '[data-line-comment-button]',
-                // Blue plus in gutter  
-                'button.btn-octicon',
-                '.line-comments button',
-                // React UI buttons
-                'button[data-component="IconButton"]',
-            ];
+    } catch (e) {
+        console.log('[MD Review] Error:', e);
+        // Copy to clipboard as fallback
+        try {
+            await navigator.clipboard.writeText(body);
+            showNotification('Could not post. Comment copied to clipboard.');
+        } catch {
+            showNotification('Could not post comment.');
+        }
+    }
+}
 
-            let plusBtn: HTMLElement | null = null;
+function getCSRFToken(): string | null {
+    // GitHub stores CSRF token in meta tag
+    const meta = document.querySelector('meta[name="csrf-token"]');
+    if (meta) {
+        return meta.getAttribute('content');
+    }
 
-            // Check in the line first
-            for (const sel of plusSelectors) {
-                plusBtn = targetLine!.querySelector(sel) as HTMLElement;
-                if (plusBtn) {
-                    console.log(`[MD Review] Found plus button in line: ${sel}`);
-                    break;
-                }
-            }
+    // Also check for authenticity_token in forms
+    const input = document.querySelector('input[name="authenticity_token"]');
+    if (input instanceof HTMLInputElement) {
+        return input.value;
+    }
 
-            // Check parent row
-            if (!plusBtn) {
-                const row = targetLine!.closest('tr');
-                if (row) {
-                    for (const sel of plusSelectors) {
-                        plusBtn = row.querySelector(sel) as HTMLElement;
-                        if (plusBtn) {
-                            console.log(`[MD Review] Found plus button in row: ${sel}`);
-                            break;
-                        }
-                    }
-                }
-            }
+    // Check for token in script data
+    const scripts = document.querySelectorAll('script[type="application/json"]');
+    for (const script of scripts) {
+        try {
+            const data = JSON.parse(script.textContent || '');
+            if (data.token) return data.token;
+            if (data.csrfToken) return data.csrfToken;
+        } catch (e) {
+            // Ignore parse errors
+        }
+    }
 
-            // Check nearby siblings
-            if (!plusBtn) {
-                const allButtons = document.querySelectorAll('button');
-                for (const btn of allButtons) {
-                    const text = btn.getAttribute('aria-label') || btn.textContent || '';
-                    if (text.toLowerCase().includes('comment') || text === '+') {
-                        if (btn instanceof HTMLElement && btn.offsetParent !== null) {
-                            plusBtn = btn;
-                            console.log('[MD Review] Found plus button by aria-label');
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (plusBtn) {
-                console.log('[MD Review] Clicking plus button');
-                plusBtn.click();
-                resolve(true);
-            } else {
-                // Try clicking directly on the line number cell (GitHub behavior)
-                const lineNumCell = targetLine!.querySelector('td.blob-num, [data-line-number], .line-number');
-                if (lineNumCell instanceof HTMLElement) {
-                    console.log('[MD Review] Clicking on line number cell');
-                    lineNumCell.click();
-                    resolve(true);
-                } else {
-                    console.log('[MD Review] No plus button found');
-                    resolve(false);
-                }
-            }
-        }, 200);
-    });
+    return null;
 }
 
 function fillAndSubmit(form: GitHubCommentForm, comment: string): void {
