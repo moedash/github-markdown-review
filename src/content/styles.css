@@ -300,6 +300,19 @@
     color: #6e7681;
 }
 
+.md-review-comment-file {
+    font-size: 11px;
+    color: #58a6ff;
+    margin-bottom: 6px;
+    font-family: monospace;
+}
+
+.md-review-comment-status {
+    font-size: 11px;
+    color: #d29922;
+    margin-top: 8px;
+}
+
 .md-review-comment-quote {
     font-size: 12px;
     color: #8b949e;

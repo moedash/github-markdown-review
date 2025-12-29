@@ -1,6 +1,4 @@
 // Content script - adds inline commenting to GitHub's rich diff view
-// Posts comments directly to GitHub PR
-
 import './styles.css';
 
 console.log('[MD Review] Content script loaded');
@@ -11,26 +9,35 @@ interface SelectionInfo {
     startOffset: number;
     endOffset: number;
     rect: DOMRect;
-    element?: HTMLElement;
 }
 
-interface ParsedComment {
+interface Comment {
     id: string;
-    body: string;
-    author: string;
-    createdAt: string;
-    metadata: {
-        file: string;
-        start: number;
-        end: number;
-        text: string;
-    } | null;
+    text: string;
+    selectedText: string;
+    filePath: string;
+    startOffset: number;
+    endOffset: number;
+    timestamp: number;
+    postedToGitHub: boolean;
 }
 
 let activeCommentBox: HTMLElement | null = null;
+let comments: Comment[] = [];
+
+function getPRKey(): string {
+    const match = window.location.pathname.match(/\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+    return match ? `${match[1]}-${match[2]}-${match[3]}` : 'unknown-pr';
+}
 
 function init(): void {
     console.log('[MD Review] Initializing...');
+
+    // Load saved comments
+    loadComments();
+
+    // Load existing GitHub comments
+    setTimeout(loadExistingGitHubComments, 500);
 
     // Add selection listener
     document.addEventListener('mouseup', handleTextSelection);
@@ -41,8 +48,172 @@ function init(): void {
     // Process existing rich diffs
     processExistingRichDiffs();
 
-    // Load and display existing comments
-    setTimeout(loadAndDisplayComments, 500);
+    // Show sidebar if we have comments
+    if (comments.length > 0) {
+        renderCommentsSidebar();
+    }
+}
+
+function loadExistingGitHubComments(): void {
+    // Inject script to access GitHub's internal state
+    const script = document.createElement('script');
+    script.textContent = `
+    (function() {
+      // Try to find GitHub's comment data
+      let commentsData = [];
+      
+      // Method 1: Check for embedded JSON data
+      const scripts = document.querySelectorAll('script[type="application/json"]');
+      scripts.forEach(s => {
+        try {
+          const data = JSON.parse(s.textContent);
+          if (data.comments) commentsData = commentsData.concat(data.comments);
+          if (data.issueComments) commentsData = commentsData.concat(data.issueComments);
+        } catch(e) {}
+      });
+      
+      // Method 2: Look for React fiber/state
+      const reactRoot = document.querySelector('[data-turbo-body]') || document.getElementById('repo-content-turbo-frame');
+      if (reactRoot && reactRoot._reactRootContainer) {
+        console.log('[MD Review] Found React root');
+      }
+      
+      // Method 3: Find timeline items with comment data
+      const timelineItems = document.querySelectorAll('.js-timeline-item, [data-gid]');
+      timelineItems.forEach(item => {
+        const bodyEl = item.querySelector('.comment-body, .js-comment-body');
+        if (bodyEl) {
+          const gid = item.getAttribute('data-gid') || item.id;
+          commentsData.push({
+            id: gid,
+            body: bodyEl.innerHTML,
+            text: bodyEl.textContent
+          });
+        }
+      });
+      
+      // Send back to content script
+      window.postMessage({ type: 'MD_REVIEW_COMMENTS', comments: commentsData }, '*');
+    })();
+  `;
+    document.head.appendChild(script);
+    script.remove();
+
+    // Listen for response
+    window.addEventListener('message', handleGitHubComments);
+
+    // Also scan DOM directly as fallback
+    scanDOMForComments();
+}
+
+function handleGitHubComments(event: MessageEvent): void {
+    if (event.data.type !== 'MD_REVIEW_COMMENTS') return;
+
+    const ghComments = event.data.comments || [];
+    console.log(`[MD Review] Received ${ghComments.length} comments from page context`);
+
+    ghComments.forEach((c: any) => {
+        if (c.text) {
+            parseAndAddComment(c.text, c.id);
+        }
+    });
+
+    if (comments.length > 0) {
+        renderCommentsSidebar();
+    }
+}
+
+function scanDOMForComments(): void {
+    // Scan all elements that might contain comments
+    const containers = document.querySelectorAll(
+        '.js-discussion, .js-timeline-item, .review-comment, .timeline-comment, ' +
+        '[data-gid], .js-comment, .comment, .issue-comment'
+    );
+
+    console.log(`[MD Review] Scanning ${containers.length} potential comment containers`);
+
+    containers.forEach((container) => {
+        const bodyEl = container.querySelector('.comment-body, .js-comment-body, .markdown-body');
+        if (bodyEl) {
+            const text = bodyEl.textContent || '';
+            const id = container.getAttribute('data-gid') || container.id || '';
+            parseAndAddComment(text, id);
+        }
+    });
+
+    // Also check for inline review comments in diff view
+    const reviewComments = document.querySelectorAll('.review-comment-contents, .inline-comment-form-container');
+    reviewComments.forEach((rc) => {
+        const text = rc.textContent || '';
+        parseAndAddComment(text, '');
+    });
+
+    if (comments.length > 0) {
+        console.log(`[MD Review] Total comments loaded: ${comments.length}`);
+        renderCommentsSidebar();
+    }
+}
+
+function parseAndAddComment(text: string, id: string): void {
+    // Look for our comment format: On "selected text": or quoted text
+    const patterns = [
+        /On\s+[""`]([^""`]+)[""`]:/,
+        /On\s+`([^`]+)`:/,
+        />\s*[""]([^""]+)[""]/,
+    ];
+
+    for (const pattern of patterns) {
+        const match = text.match(pattern);
+        if (match) {
+            const selectedText = match[1];
+
+            // Check if already exists
+            if (comments.some(c => c.selectedText.slice(0, 20) === selectedText.slice(0, 20))) {
+                return;
+            }
+
+            // Extract the actual comment (text after the match)
+            const afterMatch = text.slice(text.indexOf(match[0]) + match[0].length).trim();
+            if (afterMatch.length < 3) return;
+
+            comments.push({
+                id: id || `gh-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                text: afterMatch.slice(0, 300),
+                selectedText: selectedText.slice(0, 100),
+                filePath: 'document.md',
+                startOffset: 0,
+                endOffset: 0,
+                timestamp: Date.now(),
+                postedToGitHub: true,
+            });
+
+            console.log(`[MD Review] Parsed comment on "${selectedText.slice(0, 30)}..."`);
+            return;
+        }
+    }
+}
+
+function loadComments(): void {
+    const key = `md-review-${getPRKey()}`;
+    try {
+        const saved = localStorage.getItem(key);
+        if (saved) {
+            comments = JSON.parse(saved);
+            console.log(`[MD Review] Loaded ${comments.length} comments from storage`);
+        }
+    } catch (e) {
+        console.error('[MD Review] Failed to load comments:', e);
+    }
+}
+
+function saveComments(): void {
+    const key = `md-review-${getPRKey()}`;
+    try {
+        localStorage.setItem(key, JSON.stringify(comments));
+        console.log(`[MD Review] Saved ${comments.length} comments`);
+    } catch (e) {
+        console.error('[MD Review] Failed to save:', e);
+    }
 }
 
 function observeRichDiffViews(): void {
@@ -52,7 +223,8 @@ function observeRichDiffViews(): void {
         if (debounceTimer) clearTimeout(debounceTimer);
         debounceTimer = window.setTimeout(() => {
             processExistingRichDiffs();
-        }, 200);
+            if (comments.length > 0) renderCommentsSidebar();
+        }, 300);
     });
 
     observer.observe(document.body, { childList: true, subtree: true });
@@ -63,14 +235,14 @@ function observeRichDiffViews(): void {
         const button = target.closest('button, [role="button"]');
         if (button?.textContent?.toLowerCase().includes('rich diff') ||
             button?.textContent?.toLowerCase().includes('display the source')) {
-            setTimeout(processExistingRichDiffs, 300);
-            setTimeout(() => loadAndDisplayComments(), 500);
+            setTimeout(processExistingRichDiffs, 500);
         }
     }, true);
 }
 
 function processExistingRichDiffs(): void {
-    const selectors = ['.markdown-body', '.js-rendered-markdown', '.prose'];
+    const selectors = ['.markdown-body', '.js-rendered-markdown', '.prose', '[data-paste-markdown-skip]'];
+    let found = 0;
 
     for (const selector of selectors) {
         document.querySelectorAll(selector).forEach((el) => {
@@ -79,13 +251,18 @@ function processExistingRichDiffs(): void {
                 el.dataset.mdReviewEnabled = 'true';
                 el.classList.add('md-review-selectable');
                 addLineHoverButtons(el);
+                found++;
             }
         });
+    }
+
+    if (found > 0) {
+        console.log(`[MD Review] Enabled commenting on ${found} elements`);
     }
 }
 
 function addLineHoverButtons(container: HTMLElement): void {
-    const blocks = container.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, blockquote, pre');
+    const blocks = container.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, blockquote, pre, td');
 
     blocks.forEach((block, index) => {
         if (block instanceof HTMLElement && !block.dataset.mdReviewLine) {
@@ -99,15 +276,15 @@ function addLineHoverButtons(container: HTMLElement): void {
 
             plusBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
+                e.preventDefault();
                 const text = block.textContent?.trim().slice(0, 100) || '';
                 const rect = block.getBoundingClientRect();
                 showCommentBox({
                     text,
-                    filePath: getFilePathForElement(container) || 'unknown',
+                    filePath: getFilePathForElement(container) || 'README.md',
                     startOffset: index * 1000,
                     endOffset: index * 1000 + text.length,
                     rect: new DOMRect(rect.left, rect.top, rect.width, rect.height),
-                    element: block,
                 });
             });
 
@@ -117,62 +294,17 @@ function addLineHoverButtons(container: HTMLElement): void {
     });
 }
 
-function loadAndDisplayComments(): void {
-    const comments = parseExistingComments();
-    console.log(`[MD Review] Found ${comments.length} MD Review comments on this PR`);
-
-    if (comments.length > 0) {
-        renderCommentsSidebar(comments);
-    }
-}
-
-function parseExistingComments(): ParsedComment[] {
-    const comments: ParsedComment[] = [];
-
-    // Find all comment bodies on the page
-    const commentBodies = document.querySelectorAll('.comment-body, .js-comment-body, .markdown-body.comment-body');
-
-    commentBodies.forEach((el, index) => {
-        const text = el.textContent || '';
-
-        // Check for our metadata marker
-        const metadataMatch = text.match(/\[\/\/\]: # \(md-review:(.*?)\)/);
-        if (metadataMatch) {
-            try {
-                const metadata = JSON.parse(metadataMatch[1]);
-                const commentContainer = el.closest('.timeline-comment, .review-comment');
-                const authorEl = commentContainer?.querySelector('.author');
-                const timeEl = commentContainer?.querySelector('relative-time');
-
-                // Extract the actual comment (after the metadata and "On..." line)
-                const bodyMatch = text.match(/\*\*On ".*?":\*\*\s*([\s\S]*)/);
-                const cleanBody = bodyMatch ? bodyMatch[1].trim() : text.replace(/\[\/\/\]: # \(md-review:.*?\)/, '').trim();
-
-                comments.push({
-                    id: `gh-${index}`,
-                    body: cleanBody,
-                    author: authorEl?.textContent?.trim() || 'unknown',
-                    createdAt: timeEl?.getAttribute('datetime') || '',
-                    metadata,
-                });
-            } catch (e) {
-                // Invalid JSON, skip
-            }
-        }
-    });
-
-    return comments;
-}
-
-function renderCommentsSidebar(comments: ParsedComment[]): void {
+function renderCommentsSidebar(): void {
     // Remove existing sidebar
     document.querySelectorAll('.md-review-comments-sidebar').forEach(el => el.remove());
+
+    if (comments.length === 0) return;
 
     const sidebar = document.createElement('div');
     sidebar.className = 'md-review-comments-sidebar';
     sidebar.innerHTML = `
     <div class="md-review-sidebar-header">
-      <span>💬 MD Review Comments (${comments.length})</span>
+      <span>💬 Comments (${comments.length})</span>
       <button class="md-review-sidebar-toggle" data-action="toggle">−</button>
     </div>
     <div class="md-review-sidebar-content"></div>
@@ -184,38 +316,65 @@ function renderCommentsSidebar(comments: ParsedComment[]): void {
         const item = document.createElement('div');
         item.className = 'md-review-sidebar-comment';
         item.innerHTML = `
-      <div class="md-review-comment-meta">
-        <strong>${escapeHtml(comment.author)}</strong>
-        ${comment.createdAt ? `<span class="md-review-comment-time">${formatDate(comment.createdAt)}</span>` : ''}
+      <div class="md-review-comment-file">${escapeHtml(comment.filePath)}</div>
+      <div class="md-review-comment-quote">"${escapeHtml(comment.selectedText.slice(0, 60))}${comment.selectedText.length > 60 ? '...' : ''}"</div>
+      <div class="md-review-comment-text">${escapeHtml(comment.text)}</div>
+      <div class="md-review-comment-actions">
+        <button class="md-review-btn-small" data-action="copy" data-id="${comment.id}">Copy to PR</button>
+        <button class="md-review-btn-small md-review-btn-danger" data-action="delete" data-id="${comment.id}">Delete</button>
       </div>
-      ${comment.metadata ? `<div class="md-review-comment-quote">"${escapeHtml(comment.metadata.text.slice(0, 60))}${comment.metadata.text.length > 60 ? '...' : ''}"</div>` : ''}
-      <div class="md-review-comment-text">${escapeHtml(comment.body)}</div>
+      ${!comment.postedToGitHub ? '<div class="md-review-comment-status">⚠️ Not yet posted to GitHub</div>' : ''}
     `;
         content.appendChild(item);
     });
 
     sidebar.addEventListener('click', (e) => {
         const target = e.target as HTMLElement;
-        if (target.dataset.action === 'toggle') {
+        const action = target.dataset.action;
+        const id = target.dataset.id;
+
+        if (action === 'toggle') {
             sidebar.classList.toggle('md-review-sidebar-collapsed');
             target.textContent = sidebar.classList.contains('md-review-sidebar-collapsed') ? '+' : '−';
+        } else if (action === 'delete' && id) {
+            deleteComment(id);
+        } else if (action === 'copy' && id) {
+            copyCommentToClipboard(id);
         }
     });
 
     document.body.appendChild(sidebar);
 }
 
-function formatDate(isoString: string): string {
-    try {
-        const date = new Date(isoString);
-        return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    } catch {
-        return '';
-    }
+function deleteComment(id: string): void {
+    comments = comments.filter(c => c.id !== id);
+    saveComments();
+    renderCommentsSidebar();
+    showNotification('Comment deleted');
+}
+
+function copyCommentToClipboard(id: string): void {
+    const comment = comments.find(c => c.id === id);
+    if (!comment) return;
+
+    const text = formatCommentForGitHub(comment);
+    navigator.clipboard.writeText(text).then(() => {
+        showNotification('Copied! Paste in PR comment box.');
+    });
+}
+
+function formatCommentForGitHub(comment: Comment): string {
+    return `**On \`${comment.filePath}\`:**\n\n> "${comment.selectedText.slice(0, 100)}${comment.selectedText.length > 100 ? '...' : ''}"\n\n${comment.text}`;
 }
 
 function handleTextSelection(event: MouseEvent): void {
-    if (activeCommentBox && !activeCommentBox.contains(event.target as Node)) {
+    // Don't close if clicking inside the comment box
+    if (activeCommentBox && activeCommentBox.contains(event.target as Node)) {
+        return;
+    }
+
+    // Close existing comment box if clicking elsewhere
+    if (activeCommentBox) {
         closeCommentBox();
     }
 
@@ -244,10 +403,7 @@ function handleTextSelection(event: MouseEvent): void {
 function findMarkdownBody(node: Node): HTMLElement | null {
     let current: Node | null = node;
     while (current) {
-        if (current instanceof HTMLElement &&
-            (current.classList.contains('markdown-body') ||
-                current.classList.contains('prose') ||
-                current.dataset.mdReviewEnabled)) {
+        if (current instanceof HTMLElement && current.dataset.mdReviewEnabled) {
             return current;
         }
         current = current.parentNode;
@@ -255,24 +411,42 @@ function findMarkdownBody(node: Node): HTMLElement | null {
     return null;
 }
 
-function getFilePathForElement(element: HTMLElement): string | null {
+function getFilePathForElement(element: HTMLElement): string {
     let current: HTMLElement | null = element;
 
     while (current) {
-        const pathEl = current.querySelector('[data-path], a[title][href*="blob"]');
-        if (pathEl instanceof HTMLElement) {
-            const path = pathEl.dataset.path || pathEl.getAttribute('title');
-            if (path) return cleanPath(path);
+        // Look for file path in various places
+        const pathEl = current.querySelector('[data-path]');
+        if (pathEl instanceof HTMLElement && pathEl.dataset.path) {
+            return cleanPath(pathEl.dataset.path);
         }
 
-        for (const link of current.querySelectorAll('a')) {
+        // Look for links with file titles
+        const links = current.querySelectorAll('a[title]');
+        for (const link of links) {
             const title = link.getAttribute('title');
-            if (title?.endsWith('.md')) return cleanPath(title);
+            if (title && (title.endsWith('.md') || title.endsWith('.txt'))) {
+                return cleanPath(title);
+            }
+        }
+
+        // Look in the diff header
+        const diffHeader = current.querySelector('.file-header, .Diff-module__header, [data-file-header]');
+        if (diffHeader) {
+            const text = diffHeader.textContent;
+            const match = text?.match(/([^\s]+\.md)/);
+            if (match) return cleanPath(match[1]);
         }
 
         current = current.parentElement;
     }
-    return 'README.md';
+
+    // Fallback: look for any .md file mentioned in nearby context
+    const pageText = document.querySelector('.file-info, .file-header')?.textContent || '';
+    const mdMatch = pageText.match(/([^\s]+\.md)/);
+    if (mdMatch) return cleanPath(mdMatch[1]);
+
+    return 'document.md';
 }
 
 function cleanPath(path: string): string {
@@ -305,26 +479,31 @@ function showCommentBox(selection: SelectionInfo): void {
     </div>
     <textarea class="md-review-textarea" placeholder="Add your comment..." rows="3"></textarea>
     <div class="md-review-comment-footer">
-      <span class="md-review-hint">Posts to GitHub PR</span>
+      <span class="md-review-hint">${selection.filePath}</span>
       <div class="md-review-actions">
         <button class="md-review-btn md-review-btn-secondary" data-action="cancel">Cancel</button>
-        <button class="md-review-btn md-review-btn-primary" data-action="submit">Post Comment</button>
+        <button class="md-review-btn md-review-btn-primary" data-action="submit">Add Comment</button>
       </div>
     </div>
   `;
 
-    box.style.top = `${selection.rect.bottom + window.scrollY + 8}px`;
-    box.style.left = `${Math.min(selection.rect.left + window.scrollX, window.innerWidth - 360)}px`;
+    // Position the box
+    const top = selection.rect.bottom + window.scrollY + 8;
+    const left = Math.max(10, Math.min(selection.rect.left + window.scrollX, window.innerWidth - 360));
+    box.style.top = `${top}px`;
+    box.style.left = `${left}px`;
 
     box.addEventListener('click', (e) => {
+        e.stopPropagation();
         const action = (e.target as HTMLElement).dataset.action;
         if (action === 'close' || action === 'cancel') {
             closeCommentBox();
             window.getSelection()?.removeAllRanges();
         } else if (action === 'submit') {
             const textarea = box.querySelector('.md-review-textarea') as HTMLTextAreaElement;
-            if (textarea.value.trim()) {
-                postCommentToGitHub(selection, textarea.value.trim());
+            const text = textarea.value.trim();
+            if (text) {
+                addComment(selection, text);
                 closeCommentBox();
                 window.getSelection()?.removeAllRanges();
             }
@@ -335,8 +514,9 @@ function showCommentBox(selection: SelectionInfo): void {
     textarea.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
             e.preventDefault();
-            if (textarea.value.trim()) {
-                postCommentToGitHub(selection, textarea.value.trim());
+            const text = textarea.value.trim();
+            if (text) {
+                addComment(selection, text);
                 closeCommentBox();
                 window.getSelection()?.removeAllRanges();
             }
@@ -345,9 +525,111 @@ function showCommentBox(selection: SelectionInfo): void {
         }
     });
 
+    // Prevent mouseup from triggering new selection handler
+    box.addEventListener('mouseup', (e) => e.stopPropagation());
+
     document.body.appendChild(box);
     activeCommentBox = box;
     setTimeout(() => textarea.focus(), 10);
+}
+
+function addComment(selection: SelectionInfo, text: string): void {
+    const comment: Comment = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        text,
+        selectedText: selection.text,
+        filePath: selection.filePath,
+        startOffset: selection.startOffset,
+        endOffset: selection.endOffset,
+        timestamp: Date.now(),
+        postedToGitHub: false,
+    };
+
+    comments.push(comment);
+    saveComments();
+    renderCommentsSidebar();
+
+    // Try to post to GitHub
+    postToGitHub(comment);
+}
+
+function postToGitHub(comment: Comment): void {
+    const formattedComment = formatCommentForGitHub(comment);
+
+    // Find GitHub's comment form - try multiple selectors
+    const formSelectors = [
+        'form.js-new-comment-form',
+        'form[action*="comments"]',
+        '#new_comment_form',
+        '.timeline-comment-wrapper form',
+    ];
+
+    let form: HTMLFormElement | null = null;
+    let textarea: HTMLTextAreaElement | null = null;
+
+    for (const selector of formSelectors) {
+        form = document.querySelector(selector) as HTMLFormElement;
+        if (form) {
+            textarea = form.querySelector('textarea') as HTMLTextAreaElement;
+            if (textarea && textarea.offsetParent !== null) break;
+            form = null;
+        }
+    }
+
+    // Also try finding textarea directly
+    if (!textarea) {
+        const textareaSelectors = [
+            '#new_comment_field',
+            'textarea[name="comment[body]"]',
+            'textarea.comment-form-textarea',
+        ];
+        for (const sel of textareaSelectors) {
+            textarea = document.querySelector(sel) as HTMLTextAreaElement;
+            if (textarea && textarea.offsetParent !== null) {
+                form = textarea.closest('form');
+                break;
+            }
+        }
+    }
+
+    if (!textarea) {
+        // Fallback: copy to clipboard
+        navigator.clipboard.writeText(formattedComment).then(() => {
+            showNotification('Copied! Scroll down and paste in comment box.');
+        });
+        return;
+    }
+
+    // Fill the textarea
+    textarea.value = formattedComment;
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    textarea.dispatchEvent(new Event('change', { bubbles: true }));
+
+    // Find and click the submit button
+    const submitBtn = form?.querySelector('button[type="submit"]:not([disabled])') as HTMLButtonElement ||
+        form?.querySelector('.btn-primary:not([disabled])') as HTMLButtonElement;
+
+    if (submitBtn) {
+        // Scroll to form first
+        textarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+        setTimeout(() => {
+            submitBtn.click();
+            comment.postedToGitHub = true;
+            saveComments();
+
+            setTimeout(() => {
+                renderCommentsSidebar();
+                showNotification('Comment posted to GitHub!');
+                // Reload comments from page
+                setTimeout(loadExistingGitHubComments, 2000);
+            }, 1000);
+        }, 500);
+    } else {
+        textarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        textarea.focus();
+        showNotification('Comment filled. Click "Comment" button to post.');
+    }
 }
 
 function closeCommentBox(): void {
@@ -361,77 +643,6 @@ function escapeHtml(text: string): string {
     return div.innerHTML;
 }
 
-function postCommentToGitHub(selection: SelectionInfo, comment: string): void {
-    // Build the comment with metadata
-    const metadata = {
-        file: selection.filePath,
-        start: selection.startOffset,
-        end: selection.endOffset,
-        text: selection.text.slice(0, 100),
-    };
-
-    const fullComment = `[//]: # (md-review:${JSON.stringify(metadata)})\n\n**On "${selection.text.length > 50 ? selection.text.slice(0, 50) + '...' : selection.text}":**\n\n${comment}`;
-
-    // Find GitHub's comment form
-    const form = findGitHubCommentForm();
-
-    if (form) {
-        // Fill the form
-        form.textarea.value = fullComment;
-        form.textarea.dispatchEvent(new Event('input', { bubbles: true }));
-        form.textarea.focus();
-
-        // Try to auto-submit
-        if (form.submitButton) {
-            showNotification('Submitting comment to GitHub...');
-            setTimeout(() => {
-                form.submitButton?.click();
-                setTimeout(() => {
-                    showNotification('Comment posted! Refresh to see it in the sidebar.');
-                    loadAndDisplayComments();
-                }, 1000);
-            }, 100);
-        } else {
-            form.textarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            showNotification('Comment filled in form below. Click "Comment" to submit.');
-        }
-    } else {
-        // Fallback: copy to clipboard
-        navigator.clipboard.writeText(fullComment).then(() => {
-            showNotification('Comment copied! Paste in the PR comment box and submit.');
-        });
-    }
-}
-
-interface GitHubForm {
-    textarea: HTMLTextAreaElement;
-    submitButton: HTMLButtonElement | null;
-}
-
-function findGitHubCommentForm(): GitHubForm | null {
-    // Try various GitHub comment form selectors
-    const textareaSelectors = [
-        '#new_comment_field',
-        'textarea[name="comment[body]"]',
-        '.js-new-comment-form textarea',
-        '#pull_request_review_body',
-        'textarea.comment-form-textarea',
-    ];
-
-    for (const selector of textareaSelectors) {
-        const textarea = document.querySelector(selector) as HTMLTextAreaElement;
-        if (textarea && textarea.offsetParent !== null) {
-            // Find the submit button near this textarea
-            const form = textarea.closest('form');
-            const submitButton = form?.querySelector('button[type="submit"]:not([disabled]), button.btn-primary:not([disabled])') as HTMLButtonElement | null;
-
-            return { textarea, submitButton };
-        }
-    }
-
-    return null;
-}
-
 function showNotification(message: string, type: 'success' | 'error' = 'success'): void {
     document.querySelectorAll('.md-review-notification').forEach(el => el.remove());
 
@@ -443,7 +654,7 @@ function showNotification(message: string, type: 'success' | 'error' = 'success'
     setTimeout(() => {
         notification.classList.add('md-review-notification-hide');
         setTimeout(() => notification.remove(), 300);
-    }, 3000);
+    }, 4000);
 }
 
 // Initialize
