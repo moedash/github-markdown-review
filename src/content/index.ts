@@ -460,64 +460,315 @@ function showCommentBox(selection: SelectionInfo): void {
 }
 
 function postCommentToGitHub(selection: SelectionInfo, commentText: string): void {
-    // Format the comment with our metadata
+    console.log('[MD Review] postCommentToGitHub called');
+
+    // Format the comment
     const formattedComment = `**On \`${selection.filePath}\`:**\n\n> "${selection.text.slice(0, 100)}${selection.text.length > 100 ? '...' : ''}"\n\n${commentText}`;
 
-    // Find GitHub's comment form
-    const textarea = findGitHubCommentTextarea();
+    // First, check if there's already a comment form open
+    let form = findGitHubCommentForm();
 
-    if (!textarea) {
-        // Fallback: copy to clipboard
-        navigator.clipboard.writeText(formattedComment).then(() => {
-            showNotification('Copied! Scroll down and paste in the comment box.');
-        });
+    if (form) {
+        fillAndSubmit(form, formattedComment);
         return;
     }
 
-    // Fill the form
-    textarea.value = formattedComment;
-    textarea.dispatchEvent(new Event('input', { bubbles: true }));
-    textarea.dispatchEvent(new Event('change', { bubbles: true }));
+    // No form open - click GitHub's plus button to open one
+    console.log('[MD Review] No form found, clicking plus button...');
 
-    // Find submit button
-    const form = textarea.closest('form');
-    const submitBtn = form?.querySelector('button[type="submit"]:not([disabled]), .btn-primary:not([disabled])') as HTMLButtonElement;
+    clickGitHubPlusButton().then(plusClicked => {
+        if (plusClicked) {
+            // Wait for form to appear
+            setTimeout(() => {
+                const newForm = findGitHubCommentForm();
+                if (newForm) {
+                    fillAndSubmit(newForm, formattedComment);
+                } else {
+                    console.log('[MD Review] Form not appeared after click');
+                    retryWithScroll(formattedComment);
+                }
+            }, 600);
+        } else {
+            retryWithScroll(formattedComment);
+        }
+    });
+}
 
-    if (submitBtn) {
-        textarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+function retryWithScroll(comment: string): void {
+    // Scroll to find the diff section
+    const diffContainer = document.querySelector('[data-hunk], .diff-table, .js-diff-progressive-container');
+    if (diffContainer instanceof HTMLElement) {
+        diffContainer.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
         setTimeout(() => {
-            submitBtn.click();
-            showNotification('Posting comment...');
-
-            // Reload comments after posting
-            setTimeout(() => {
-                loadCommentsFromGitHub();
-                showNotification('Comment posted!');
-            }, 2000);
-        }, 300);
+            clickGitHubPlusButton().then(clicked => {
+                if (clicked) {
+                    setTimeout(() => {
+                        const form = findGitHubCommentForm();
+                        if (form) {
+                            fillAndSubmit(form, comment);
+                        } else {
+                            showNotification('Switch to code diff view and click blue + on a line');
+                        }
+                    }, 600);
+                } else {
+                    showNotification('Switch to code diff view and click blue + on a line');
+                }
+            });
+        }, 500);
     } else {
-        textarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        textarea.focus();
-        showNotification('Comment filled. Click "Comment" to post.');
+        showNotification('Switch to code diff view and click blue + on a line');
     }
 }
 
-function findGitHubCommentTextarea(): HTMLTextAreaElement | null {
-    const selectors = [
-        '#new_comment_field',
-        'textarea[name="comment[body]"]',
-        'textarea.comment-form-textarea',
-        '.js-new-comment-form textarea',
-    ];
+function clickGitHubPlusButton(): Promise<boolean> {
+    return new Promise((resolve) => {
+        console.log('[MD Review] Looking for diff lines to click plus button...');
 
-    for (const sel of selectors) {
-        const textarea = document.querySelector(sel) as HTMLTextAreaElement;
-        if (textarea && textarea.offsetParent !== null) {
-            return textarea;
+        // Find the diff container (may be hidden if viewing rich diff)
+        const diffSelectors = [
+            // Code diff table rows
+            'table.diff-table tbody tr',
+            '[data-hunk] tr',
+            '.js-file-line-container tr',
+            // Individual line cells
+            '.blob-code-addition',
+            '.blob-code-deletion',
+            '.blob-code-context',
+            // Newer GitHub UI
+            '[data-line-number]',
+            '.diff-line-row',
+        ];
+
+        let targetLine: HTMLElement | null = null;
+
+        for (const sel of diffSelectors) {
+            const lines = document.querySelectorAll(sel);
+            console.log(`[MD Review] Selector "${sel}": ${lines.length} elements`);
+
+            for (const line of lines) {
+                if (line instanceof HTMLElement) {
+                    // Even if not visible, we can trigger events
+                    targetLine = line;
+                    break;
+                }
+            }
+            if (targetLine) break;
+        }
+
+        if (!targetLine) {
+            console.log('[MD Review] No diff lines found');
+            resolve(false);
+            return;
+        }
+
+        console.log('[MD Review] Found target line, simulating hover...');
+
+        // Simulate mouseenter to make plus button appear
+        targetLine.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true }));
+        targetLine.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true }));
+        targetLine.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true }));
+
+        // Wait for plus button to appear
+        setTimeout(() => {
+            // Look for plus button that appeared
+            const plusSelectors = [
+                'button[aria-label*="comment" i]',
+                'button.js-add-line-comment',
+                '.add-line-comment',
+                '[data-line-comment-button]',
+                // Blue plus in gutter  
+                'button.btn-octicon',
+                '.line-comments button',
+                // React UI buttons
+                'button[data-component="IconButton"]',
+            ];
+
+            let plusBtn: HTMLElement | null = null;
+
+            // Check in the line first
+            for (const sel of plusSelectors) {
+                plusBtn = targetLine!.querySelector(sel) as HTMLElement;
+                if (plusBtn) {
+                    console.log(`[MD Review] Found plus button in line: ${sel}`);
+                    break;
+                }
+            }
+
+            // Check parent row
+            if (!plusBtn) {
+                const row = targetLine!.closest('tr');
+                if (row) {
+                    for (const sel of plusSelectors) {
+                        plusBtn = row.querySelector(sel) as HTMLElement;
+                        if (plusBtn) {
+                            console.log(`[MD Review] Found plus button in row: ${sel}`);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Check nearby siblings
+            if (!plusBtn) {
+                const allButtons = document.querySelectorAll('button');
+                for (const btn of allButtons) {
+                    const text = btn.getAttribute('aria-label') || btn.textContent || '';
+                    if (text.toLowerCase().includes('comment') || text === '+') {
+                        if (btn instanceof HTMLElement && btn.offsetParent !== null) {
+                            plusBtn = btn;
+                            console.log('[MD Review] Found plus button by aria-label');
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (plusBtn) {
+                console.log('[MD Review] Clicking plus button');
+                plusBtn.click();
+                resolve(true);
+            } else {
+                // Try clicking directly on the line number cell (GitHub behavior)
+                const lineNumCell = targetLine!.querySelector('td.blob-num, [data-line-number], .line-number');
+                if (lineNumCell instanceof HTMLElement) {
+                    console.log('[MD Review] Clicking on line number cell');
+                    lineNumCell.click();
+                    resolve(true);
+                } else {
+                    console.log('[MD Review] No plus button found');
+                    resolve(false);
+                }
+            }
+        }, 200);
+    });
+}
+
+function fillAndSubmit(form: GitHubCommentForm, comment: string): void {
+    const { textarea, submitButton } = form;
+
+    // Scroll to form first
+    textarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+    setTimeout(() => {
+        // Focus and fill
+        textarea.focus();
+
+        // Method 1: Native setter for React
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+        if (nativeSetter) {
+            nativeSetter.call(textarea, comment);
+        } else {
+            textarea.value = comment;
+        }
+
+        // Trigger React's synthetic event system
+        textarea.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+        textarea.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+
+        // Also try keyboard event simulation
+        textarea.dispatchEvent(new InputEvent('input', { bubbles: true, data: comment, inputType: 'insertText' }));
+
+        console.log('[MD Review] Textarea filled, length:', textarea.value.length);
+
+        // Click submit after a short delay
+        setTimeout(() => {
+            console.log('[MD Review] Clicking:', submitButton.textContent?.trim());
+            submitButton.click();
+            showNotification('Comment posted!');
+
+            // Reload comments
+            setTimeout(loadCommentsFromGitHub, 2000);
+        }, 200);
+    }, 300);
+}
+
+interface GitHubCommentForm {
+    textarea: HTMLTextAreaElement;
+    submitButton: HTMLButtonElement;
+}
+
+function findGitHubCommentForm(): GitHubCommentForm | null {
+    console.log('[MD Review] Searching for GitHub comment form...');
+
+    // Find ALL textareas and filter
+    const allTextareas = Array.from(document.querySelectorAll('textarea')).filter(ta => {
+        if (ta.classList.contains('md-review-textarea')) return false;
+        if (ta.offsetParent === null) return false; // hidden
+        return true;
+    }) as HTMLTextAreaElement[];
+
+    console.log(`[MD Review] Found ${allTextareas.length} visible textareas`);
+
+    // Prefer textareas with comment-related attributes
+    let textarea = allTextareas.find(ta =>
+        ta.placeholder?.toLowerCase().includes('leave a comment') ||
+        ta.placeholder?.toLowerCase().includes('add a comment') ||
+        ta.getAttribute('aria-label')?.toLowerCase().includes('markdown')
+    ) || allTextareas.find(ta =>
+        ta.placeholder?.toLowerCase().includes('comment')
+    ) || allTextareas[0]; // Just use the first one if nothing matches
+
+    if (!textarea) {
+        console.log('[MD Review] No textarea found');
+        return null;
+    }
+
+    console.log(`[MD Review] Using textarea: placeholder="${textarea.placeholder}", id="${textarea.id}"`);
+
+    // Find submit button - look in ancestors
+    let container: Element | null = textarea;
+    let submitButton: HTMLButtonElement | null = null;
+
+    // Walk up the DOM looking for a container with buttons
+    for (let i = 0; i < 10 && container; i++) {
+        container = container.parentElement;
+        if (!container) break;
+
+        // Look for primary button
+        const primaryBtn = container.querySelector('button[data-variant="primary"]:not([disabled])') as HTMLButtonElement;
+        if (primaryBtn) {
+            submitButton = primaryBtn;
+            console.log(`[MD Review] Found primary button: "${primaryBtn.textContent?.trim()}"`);
+            break;
+        }
+
+        // Look for button with submit-like text
+        const buttons = container.querySelectorAll('button:not([disabled])');
+        for (const btn of buttons) {
+            const text = btn.textContent?.toLowerCase() || '';
+            if ((text.includes('comment') || text.includes('review') || text.includes('submit') || text.includes('post')) &&
+                !text.includes('cancel') && !text.includes('close')) {
+                submitButton = btn as HTMLButtonElement;
+                console.log(`[MD Review] Found button by text: "${btn.textContent?.trim()}"`);
+                break;
+            }
+        }
+        if (submitButton) break;
+    }
+
+    if (!submitButton) {
+        // Last resort: find ANY primary button on the page near the textarea
+        const rect = textarea.getBoundingClientRect();
+        const allPrimaryBtns = document.querySelectorAll('button[data-variant="primary"]:not([disabled])');
+
+        for (const btn of allPrimaryBtns) {
+            const btnRect = btn.getBoundingClientRect();
+            // Check if button is reasonably close to textarea (within 500px vertically)
+            if (Math.abs(btnRect.top - rect.bottom) < 500) {
+                submitButton = btn as HTMLButtonElement;
+                console.log(`[MD Review] Found nearby primary button: "${btn.textContent?.trim()}"`);
+                break;
+            }
         }
     }
-    return null;
+
+    if (!submitButton) {
+        console.log('[MD Review] No submit button found');
+        return null;
+    }
+
+    return { textarea, submitButton };
 }
 
 function closeCommentBox(): void {
@@ -542,7 +793,24 @@ function showNotification(message: string): void {
     setTimeout(() => {
         notification.classList.add('md-review-notification-hide');
         setTimeout(() => notification.remove(), 300);
-    }, 3000);
+    }, 4000);
+}
+
+function showNotificationWithLink(message: string, linkText: string, linkUrl: string): void {
+    document.querySelectorAll('.md-review-notification').forEach(el => el.remove());
+
+    const notification = document.createElement('div');
+    notification.className = 'md-review-notification md-review-notification-with-link';
+    notification.innerHTML = `
+    <span>${message}</span>
+    <a href="${linkUrl}" class="md-review-notification-link">${linkText} →</a>
+  `;
+    document.body.appendChild(notification);
+
+    setTimeout(() => {
+        notification.classList.add('md-review-notification-hide');
+        setTimeout(() => notification.remove(), 300);
+    }, 6000);
 }
 
 // Initialize
