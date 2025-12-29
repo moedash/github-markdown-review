@@ -380,7 +380,7 @@ function addLineHoverButtons(container: HTMLElement): void {
             const plusBtn = document.createElement('button');
             plusBtn.className = 'md-review-plus-btn';
             plusBtn.innerHTML = '+';
-            plusBtn.title = 'Add comment on this section';
+            plusBtn.title = 'Add comment on this line';
 
             plusBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
@@ -393,13 +393,88 @@ function addLineHoverButtons(container: HTMLElement): void {
                     startOffset: index * 1000,
                     endOffset: index * 1000 + text.length,
                     rect: new DOMRect(rect.left, rect.top, rect.width, rect.height),
-                });
+                }, index);
             });
 
             block.style.position = 'relative';
             block.appendChild(plusBtn);
+
+            // Check if there are comments for this line and show indicator
+            showLineCommentIndicator(block, index, container);
         }
     });
+}
+
+function showLineCommentIndicator(block: HTMLElement, lineIndex: number, container: HTMLElement): void {
+    const blockText = block.textContent?.trim().toLowerCase() || '';
+
+    // Find comments that might be for this line
+    const lineComments = comments.filter(c => {
+        // Match by line index
+        if (c.startOffset === lineIndex * 1000) return true;
+
+        // Match by text content (fuzzy)
+        if (c.selectedText && blockText.includes(c.selectedText.toLowerCase().slice(0, 20))) return true;
+
+        // Match if comment text mentions this line's content
+        const firstWords = blockText.split(' ').slice(0, 3).join(' ');
+        if (firstWords.length > 5 && c.text.toLowerCase().includes(firstWords)) return true;
+
+        return false;
+    });
+
+    if (lineComments.length > 0) {
+        // Remove existing indicator
+        block.querySelector('.md-review-line-indicator')?.remove();
+
+        const indicator = document.createElement('span');
+        indicator.className = 'md-review-line-indicator';
+        indicator.innerHTML = `💬 ${lineComments.length}`;
+        indicator.title = lineComments.map(c => c.text.slice(0, 50)).join('\n---\n');
+
+        indicator.addEventListener('click', (e) => {
+            e.stopPropagation();
+            showLineCommentsPopup(block, lineComments);
+        });
+
+        block.appendChild(indicator);
+    }
+}
+
+function showLineCommentsPopup(block: HTMLElement, lineComments: Comment[]): void {
+    // Remove existing popup
+    document.querySelectorAll('.md-review-line-popup').forEach(el => el.remove());
+
+    const popup = document.createElement('div');
+    popup.className = 'md-review-line-popup';
+
+    let html = '<div class="md-review-popup-header">Comments on this line</div>';
+    lineComments.forEach(c => {
+        html += `
+      <div class="md-review-popup-comment">
+        ${c.selectedText ? `<div class="md-review-popup-quote">"${escapeHtml(c.selectedText.slice(0, 60))}"</div>` : ''}
+        <div class="md-review-popup-text">${escapeHtml(c.text.slice(0, 200))}</div>
+      </div>
+    `;
+    });
+
+    popup.innerHTML = html;
+
+    // Position near the block
+    const rect = block.getBoundingClientRect();
+    popup.style.top = `${rect.bottom + window.scrollY + 5}px`;
+    popup.style.left = `${rect.left + window.scrollX}px`;
+
+    // Close on click outside
+    const closeHandler = (e: MouseEvent) => {
+        if (!popup.contains(e.target as Node)) {
+            popup.remove();
+            document.removeEventListener('click', closeHandler);
+        }
+    };
+    setTimeout(() => document.addEventListener('click', closeHandler), 10);
+
+    document.body.appendChild(popup);
 }
 
 function renderCommentsSidebar(): void {
@@ -573,7 +648,7 @@ function getTextOffset(container: HTMLElement, node: Node, offset: number): numb
     return offset;
 }
 
-function showCommentBox(selection: SelectionInfo): void {
+function showCommentBox(selection: SelectionInfo, lineIndex?: number): void {
     closeCommentBox();
 
     const box = document.createElement('div');
